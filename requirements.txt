@@ -1,11 +1,11 @@
 # Core de FastAPI
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
-python-multipart==0.0.20
+python-multipart==0.0.22
 
 # Testing
 pytest==8.3.4
-httpx2==2.13.0
+httpx==2.13.0
 
 # Dependencias de asincronía (Versión flexible para evitar conflictos)
 anyio>=4.10.0
