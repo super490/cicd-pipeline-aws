@@ -1,0 +1,140 @@
+name: Continuous Integration (CI) & DevSecOps # Nombre visible que tendrá este archivo de configuración en la interfaz de tu plataforma de desarrollo.
+
+on: # on le dice al sistema cuándo debe empezar a correr los procesos automáticos (como compilar, pasar pruebas automatizadas o buscar vulnerabilidades de seguridad).
+  push: #  El flujo se ejecutará automáticamente cada vez que se suba código directamente o fusione (merge) cambios en las ramas develop o main.
+    branches: [ "develop", "main" ] # 
+  pull_request: # El flujo se ejecutará en el momento en que alguien cree o actualice una solicitud de extracción dirigida a las ramas main o develop.
+    branches: [ "main", "develop" ] # El flujo se ejecutará en el momento en que se cree o actualice una solicitud de extracción dirigida a las ramas main o develop.
+  workflow_dispatch: # Permite ejecución manual
+
+# Principio de menor privilegio
+permissions: # restringir exactamente qué puede y qué no puede hacer ese token
+  contents: read # Otorga permiso de solo lectura sobre el contenido del repositorio (código fuente, ramas, tags, etc.).
+  security-events: write # Necesario para subir reportes SARIF a GitHub Security
+
+# Le dice a GitHub: "Dale al token solo los permisos exactos para leer mi código y subir reportes de seguridad, y prohíbele cualquier otra cosa".
+
+jobs: # jobs: es la sección raíz donde defines todos los trabajos (jobs) que componen tu pipeline
+  # ==========================================
+  # JOB 1: Linter, Pruebas Unitarias y Cobertura
+  # ==========================================
+
+  lint-and-test: # Nombre descriptivo (display name). Este es el nombre que verás en la interfaz web de GitHub Actions cuando el pipeline se ejecute.
+    name: Linting, Testing & Coverage #Identificador único del job. Es el nombre interno que GitHub Actions usa para referirse a este job
+    runs-on: ubuntu-latest # Define el sistema operativo del runner (la máquina virtual donde se ejecutará este job).
+
+    steps: # Lista ordenada de pasos que se ejecutarán secuencialmente dentro de este job
+      - name: Checkout del código
+        uses: actions/checkout@v4 # uses: indica que este paso ejecuta una Action reutilizable (un "plugin" de GitHub Actions).
+
+      - name: Configurar entorno de Python
+        uses: actions/setup-python@v5 # Configurar entorno de Python
+        with: # Es la sección donde pasas parámetros de entrada (inputs) a la acción.
+          python-version: "3.11" #  Las comillas son importantes en YAML para que no se interprete como un número decimal (3.1).
+          cache: "pip" # Cachea automáticamente si encuentra requirements.txt
+
+      - name: Instalar dependencias
+        run: | # Indica que este paso ejecuta comandos de shell directamente (no una Action). El símbolo | (pipe literal) en YAML indica que lo que sigue es un bloque de texto multilínea que se ejecutará como un script bash.
+          python -m pip install --upgrade pip # sirve para actualizar pip (el gestor de paquetes de Python) a su versión más reciente disponible.
+          # Buena práctica: usar un archivo de dependencias de desarrollo
+          pip install ruff pytest pytest-cov # ruff (Linter y formateador ultrarrápido para Python), pytest (Framework de testing estándar en Python), pytest-cov (Plugin de pytest que mide la cobertura de código (qué porcentaje de tu código es ejecutado por los tests)). 
+
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi # Instala las dependencias de producción de tu app
+          if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi # Instala las dependencias de desarrollo (testing, linting, etc.) si el archivo existe
+
+      - name: Análisis Estático (Ruff - Reemplazo moderno de flake8)
+        run: |
+          # Ruff es extremadamente rápido y cubre linting y formateo
+          ruff check app tests --output-format=github
+          # Opcional: ruff format --check app tests #  si lo activas, verifica que tu código esté formateado según el estilo de Ruff (similar a Black)
+
+      - name: Ejecutar Pruebas Unitarias con Cobertura
+        run: |
+          pytest --verbose \ # muestra el nombre de cada test individual y si pasó o falló, en lugar de solo puntos
+                 --cov=app \ # Esto rastrea qué líneas de código en app/ fueron ejecutadas durante los tests.
+                 --cov-report=xml \ # Genera un reporte de cobertura en formato XML (archivo coverage.xml)
+                 --junitxml=test-results.xml # Este es el formato estándar de la industria para reportar resultados de tests.
+
+      - name: Subir reportes de Tests (Opcional pero recomendado)
+        if: always() # Con always(), aunque los tests fallen, el reporte se sube y puedes ver los resultados detallados en la Pull Request.
+        uses: dorny/test-reporter@v1 # Crea un resumen visual bonito directamente en la Pull Request o en la página del workflow
+        with:
+          name: Pytest Results # El título que tendrá el reporte en la UI de GitHub.
+          path: test-results.xml # La ruta al archivo que generó pytest con --junitxml=test-results.xml.
+          reporter: java-junit # Le dice a la acción qué formato tiene el archivo de resultados.
+
+  # ==========================================
+  # JOB 2: Escaneo de Seguridad del Código (Trivy FS)
+  # ==========================================
+  # Este job se enfoca en seguridad estática del código fuente (no de la imagen Docker todavía).
+
+  security-fs-scan:  # Identificador único del job
+    name: DevSecOps - Code & Secrets Scan # Trivy no solo busca vulnerabilidades en dependencias, sino también secretos filtrados (API keys, tokens, contraseñas hardcodeadas en el código).
+    runs-on: ubuntu-latest
+
+    steps: # Inicio de la lista de pasos secuenciales para este job.
+      - name: Checkout del código 
+        uses: actions/checkout@v4 # Idéntico al Job 1. Clona el repositorio en el runner.
+
+      # BUENA PRÁCTICA: Fijar versión por tag específico (ej. v0.35.0) o SHA
+      - name: Escaneo de vulnerabilidades y secretos con Trivy # Indica que este paso buscará tanto vulnerabilidades como secretos.
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        with:
+          scan-type: 'fs'  # Escanea archivos locales (código fuente, archivos de configuración, lock files de dependencias).
+          scan-ref: '.'    # Escanea: el directorio actual. Escanea todo el directorio de trabajo actual
+          format: 'sarif'  # Es un estándar JSON se integra con GitHub. Para reportar resultados de análisis estático.
+          output: 'trivy-fs-results.sarif'  # Archivo de salida donde se guardará el reporte SARIF
+          exit-code: '1' # Falla si hay CRITICAL/HIGH. El proceso terminará con código de salida 1, lo que hace que el step falle.
+          ignore-unfixed: true #  Se encuentra vulnerabilidad en una dependencia, pero no existe una versión parcheada. Evita "fatiga de alertas" no tiene sentido bloquear el pipeline por vulnerabilidades que no puedes arreglar inmediatamente.
+          severity: 'CRITICAL,HIGH' # Se le dices a Trivy "solo considéranse bloqueantes las vulnerabilidades críticas y altas".
+
+      - name: Subir resultados a GitHub Security Tab # Indica que este paso subirá los resultados al panel de seguridad de GitHub.
+        if: always() # aunque Trivy falle, el reporte se sube y puedes ver las vulnerabilidades detalladas en la pestaña Security de GitHub.
+        uses: github/codeql-action/upload-sarif@v3 # Repositorio oficial de GitHub para CodeQL (su herramienta de análisis de seguridad). Aunque esta acción es parte de CodeQL, la función upload-sarif es genérica y acepta SARIF de cualquier herramienta (Trivy, SonarQube, etc.).
+        with:
+          sarif_file: 'trivy-fs-results.sarif' # Debe coincidir exactamente con el output que definiste en el paso anterior. GitHub parseará el SARIF y creará alertas de seguridad
+
+  # ==========================================
+  # JOB 3: Compilación y Escaneo de Imagen Docker
+  # ==========================================
+  # Este job se enfoca en construir el artefacto final (la imagen Docker) y validar su seguridad antes de que pueda ser desplegada.
+  # Nota importante: Docker está preinstalado en los runners de GitHub Actions con Ubuntu, por lo que no necesitamos instalarlo manualmente.
+
+  build-and-scan-image: # Nombre interno que se usa para referenciarlo
+    name: Build Docker & Container Security Scan #  Indica claramente las dos responsabilidades del job: construir y escanear.
+    needs: [lint-and-test, security-fs-scan] # Le dice a GitHub Actions: "NO ejecutes este job hasta que lint-and-test y security-fs-scan hayan terminado exitosamente".
+    runs-on: ubuntu-latest
+
+    steps: # Inicio de la lista de pasos secuenciales para este job.
+      - name: Checkout del código
+        uses: actions/checkout@v4 #  Clona el repositorio en el runner
+
+      - name: Configurar Docker Buildx # El constructor de imágenes Docker de nueva generación.
+        uses: docker/setup-buildx-action@v3 # # Es una extensión de Docker CLI. Ventajas(Caché avanzado, Builds multiplataforma, Mejor integración con GitHub Actions, Construcción paralela)
+
+      - name: Compilar imagen Docker localmente (con Caché) # Indica que este paso construye la imagen y usa caché para acelerar.
+        uses: docker/build-push-action@v6 # # Acción estándar de la industria para construir imágenes Docker en GitHub Actions.
+        with:
+          context: . # . significa "todo el directorio de trabajo actual" (donde está el código clonado).
+          load: true # Si no usas load: true, la imagen existiría solo en el builder de Buildx, y el siguiente paso (Trivy escaneando la imagen) no podría encontrarla. Con load: true, la imagen queda disponible como devops-api:<sha> en el daemon local de Docker, y Trivy puede escanearla.
+          tags: devops-api:${{ github.sha }} # Sintaxis de GitHub Actions para insertar el hash completo del commit que disparó el pipeline.
+          # BUENA PRÁCTICA: Usar caché de GitHub para acelerar builds futuros
+          cache-from: type=gha # Habilita la caché de GitHub Actions para las capas de Docker. 
+          cache-to: type=gha,mode=max # Exporta la caché a GitHub Actions (para que cache-from la pueda usar en el futuro).Cachea todas las capas intermedias (incluyendo las de etapas anteriores en un Dockerfile multi-stage).
+
+      - name: Escanear imagen Docker con Trivy # Indica que este paso escanea la imagen Docker recién construida.
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        with:
+          scan-type: 'image' # Escanea la imagen Docker completa (Sistema operativo, Dependencias de la app, Secretos, Configuraciones inseguras)
+          image-ref: 'devops-api:${{ github.sha }}' # Trivy buscará esta imagen en el daemon local de Docker (gracias a load: true).
+          format: 'sarif' # Igual que en el Job 2, generamos un reporte en formato estándar para subirlo a GitHub Security
+          output: 'trivy-image-results.sarif' # Archivo de salida del reporte SARIF. Nombre diferente al Job 2. Es bueno usar nombres descriptivos.
+          exit-code: '1' # CORRECCIÓN: Debe fallar si hay vulnerabilidades críticas
+          severity: 'CRITICAL,HIGH' # Igual que en el Job 2: solo CRITICAL y HIGH hacen fallar el pipeline. MEDIUM y LOW se reportan pero no bloquean.
+
+      - name: Subir resultados de la imagen a GitHub Security Tab # Indica que este paso sube los resultados del escaneo de la imagen.
+        if: always() # Igual que en el Job 2: si Trivy falla (por encontrar vulnerabilidades), este paso igual se ejecuta para subir el reporte.
+        uses: github/codeql-action/upload-sarif@v3 # Sube el archivo SARIF a la API de GitHub para que aparezca en Security > Code scanning alerts.
+        with:
+          sarif_file: 'trivy-image-results.sarif' # GitHub creará alertas separadas para las vulnerabilidades de la imagen (diferentes a las del código fuente del Job 2).
+
